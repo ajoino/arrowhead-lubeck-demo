@@ -26,18 +26,19 @@ class Controller(IPyCMixin, AsyncClient):
         self.temperature = 293.15
         self.timestep = 0
 
+    @property
+    def room_name(self):
+        return self.system.system_name.split('_')[0]
+
     async def get_setpoint(self):
-        print('Retrieving setpoint')
-        await self.ipyc_connection.send({"name": self.system.system_name, "unit": "controller"})
+        await self.ipyc_connection.send({"name": self.room_name, "system": "controller", "unit": "heater"})
         res = await self.ipyc_connection.receive()
-        print('Setpoint received')
 
         return res["setpoint"], res["timestep"]
 
     def read_temperature(self, temperature_message):
-        print(f'{temperature_message=}')
         measurement = temperature_message[0]
-        if measurement["n"] != f'{self.system.system_name}':
+        if measurement["n"] != f'{self.room_name}_temp_sensor':
             raise RuntimeError(f'Unexpected name in message: {temperature_message}')
 
         return measurement["v"]
@@ -94,6 +95,10 @@ class Heater(IPyCMixin, AsyncClient):
         super().__init__(*args, **kwargs)
         self.max_power = max_power
 
+    @property
+    def room_name(self):
+        return self.system.system_name.split('_')[0]
+
     @provided_service(
             'actuator',
             service_uri='/actuation',
@@ -107,10 +112,14 @@ class Heater(IPyCMixin, AsyncClient):
         value = max(0, min(actuation_message[0]["v"], self.max_power))
         print(f"Current heater power: {value}")
 
-        await self.ipyc_connection.send({"name": self.system.system_name, "unit": "actuator", "actuation": value})
+        await self.ipyc_connection.send({"name": self.room_name, "unit": "heater", "system": "actuator", "actuation": value})
         temp_message = await self.ipyc_connection.receive()
 
 class TemperatureSensor(IPyCMixin, AsyncClient):
+    @property
+    def room_name(self):
+        return self.system.system_name.split('_')[0]
+
     @provided_service(
             'temperature',
             service_uri='/temperature',
@@ -120,7 +129,7 @@ class TemperatureSensor(IPyCMixin, AsyncClient):
             access_policy='NOT_SECURE',
     )
     async def get_temperature(self):
-        await self.ipyc_connection.send({"name": "A11", "unit": "heater"})
+        await self.ipyc_connection.send({"name": self.room_name, "unit": "heater", "system": "sensor"})
         temp_message = await self.ipyc_connection.receive()
 
         return [{"n": self.system.system_name, "t": temp_message["timestep"], "u": "K", "v": temp_message["temp"]}]

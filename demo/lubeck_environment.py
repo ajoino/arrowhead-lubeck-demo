@@ -1,6 +1,6 @@
 import asyncio
 import random
-from typing import Dict, Mapping
+from typing import Dict, Mapping, TypedDict, cast
 from functools import partial
 import sys
 from pprint import pprint
@@ -12,16 +12,30 @@ import numpy.typing as npt
 
 #import environment
 from room import Room
+from demo.utils import ROOM_NAMES, ROOM_COORDINATES
+
+
+class RoomBoolPair(TypedDict):
+    heater: bool
+    cooler: bool
+
+
+def cleared_room_bool_pair() -> RoomBoolPair:
+    return {'heater': False, 'cooler': False}
+
+
+def cleared_update_dict() -> Dict[str, RoomBoolPair]:
+    return {room_name: cleared_room_bool_pair() for room_name in ROOM_NAMES}
+
+
 
 class ArrowheadEnvironment():
     ipyc_host: AsyncIPyCHost
     prng: RandomState
-    room_names = ('A11', 'A12', 'A13', 'A14', 'A21', 'A22', 'A23', 'A24')
-    room_coordinates = ((0, 0), (1, 0), (2, 0), (3, 0), (1, 1), (2, 1), (3, 1), (4, 1))
+    room_names = ROOM_NAMES
+    room_coordinates = ROOM_COORDINATES
     outside: Room
     rooms: Dict[str, Room]
-    actuation_updated: Dict[str, bool]
-    temperatures_read: Dict[str, bool]
 
     def __init__(self):
         self.room_init()
@@ -30,10 +44,10 @@ class ArrowheadEnvironment():
         self.heating_power = {room_name: 0.0 for room_name in self.room_names}
         self.cooling_power = {room_name: 0.0 for room_name in self.room_names}
         self.setpoints = {room_name: 293.15 for room_name in self.room_names}
-        self.actuation_updated = {room_name: False for room_name in self.room_names}
-        self.temperatures_read = {room_name: False for room_name in self.room_names}
-        self.temperatures_updated = {room_name: False for room_name in self.room_names}
-        self.setpoints_updated = {room_name: False for room_name in self.room_names}
+        self.actuation_updated: Dict[str, RoomBoolPair] = cleared_update_dict()
+        self.temperatures_read: Dict[str, RoomBoolPair] = cleared_update_dict()
+        self.temperatures_updated: Dict[str, RoomBoolPair] = cleared_update_dict()
+        self.setpoints_updated: Dict[str, RoomBoolPair] = cleared_update_dict()
 
         #@self.ipc_host.on_connect
     async def on_connect(self, connection: AsyncIPyCLink):
@@ -41,48 +55,49 @@ class ArrowheadEnvironment():
         while connection.is_active():
             message = await connection.receive()
             try:
-                if message.get("unit") == "heater":
+                if message.get("system") == "sensor":
                     async with self.temp_read_cond:
-                        print('Waiting to read temperature')
                         await self.temp_read_cond.wait()
                         await connection.send(self.send_temperature(message))
-                        self.temperatures_read = {name: True for name in self.room_names}
+                        self.temperatures_read[message["name"]][message["unit"]] = True # type: ignore
                         if self.all_temperatures_read():
                             self.temp_read_cond.notify_all()
-                    print(f'Finished one temp sensor reading')
-                elif message.get("unit") == "actuator":
+                elif message.get("system") == "actuator":
                     async with self.temp_update_cond:
-                        #await self.temp_update_cond.wait()
+                        await self.temp_update_cond.wait()
                         confirmation_message = self.send_actuation_confirmation(message)
                         await connection.send(confirmation_message)
-                        self.temperatures_updated = {name: True for name in self.room_names}
+                        self.temperatures_updated[message["name"]][message["unit"]] = True # type: ignore
                         if self.all_temperatures_updated():
                             self.temp_update_cond.notify_all()
-                    print(f'Finished one actuator reading')
-                elif message.get("unit") == "controller":
+                        else:
+                            #print('Still waiting for actuators to be updated')
+                            pass
+                    #print(f'Finished one actuator reading')
+                elif message.get("system") == "controller":
                     async with self.setpoint_read_cond:
                         #await self.setpoint_read_cond.wait()
                         await connection.send(self.send_controller_setpoint(message))
-                    print(f'Finished one setpoint reading')
+                    #print(f'Finished one setpoint reading')
                 else:
                     raise RuntimeError(
                             f'Message "{message}" is malformed, '
-                            f'"unit" field must be either "heater" or "actuator"'
+                            f'"system" field must be either "sensor", '
+                            f'"actuator", or "controller".'
                     )
             except AttributeError as e:
                 raise RuntimeError(f'Recevied message {message} of non-mapping type.') from e
 
     @property
     def current_heat_output(self) -> Dict[str, float]:
+        for room_name in self.room_names:
+            if abs(self.cooling_power[room_name]) > 0 and abs(self.heating_power[room_name]) > 0:
+                raise RuntimeError(f'Room {room_name}: Heating and cooling power should not both have a non-zero value')
         return {
             room_name: cool_pow + heat_pow
             for (room_name, cool_pow), heat_pow
             in zip(self.cooling_power.items(), self.heating_power.values())
         }
-
-    def started(self):
-        return self._started
-
 
     def send_temperature(self, message: Dict) -> Dict:
         room_name = message["name"]
@@ -152,16 +167,17 @@ class ArrowheadEnvironment():
         self.setpoints = {name: 298.0 for name in self.room_names}
 
     def all_actuations_updated(self) -> bool:
-        return all(cond for cond in self.actuation_updated.values())
+        return all(cond for room_bool_pair in self.actuation_updated.values() for cond in room_bool_pair.values())
 
     def all_setpoints_updated(self) -> bool:
-        return all(cond for cond in self.setpoints_updated.values())
+        return all(cond for room_bool_pair in self.setpoints_updated.values() for cond in room_bool_pair.values())
 
     def all_temperatures_read(self) -> bool:
-        return all(cond for cond in self.temperatures_read.values())
+        return all(cond for room_bool_pair in self.temperatures_read.values() for cond in room_bool_pair.values())
 
     def all_temperatures_updated(self) -> bool:
-        return all(cond for cond in self.temperatures_updated.values())
+        all_temperatures_cond = all(cond for room_bool_pair in self.temperatures_updated.values() for cond in room_bool_pair.values())
+        return all_temperatures_cond
 
     def update_room_temperatures(
             self,
@@ -187,17 +203,18 @@ class ArrowheadEnvironment():
             await asyncio.sleep(0.2)
             self.temp_read_cond.notify_all()
             await self.temp_read_cond.wait_for(self.all_temperatures_read)
-            self.temperatures_read = {name: False for name in self.room_names}
+            self.temperatures_read = cleared_update_dict()
 
         self.update_random_setpoints()
 
+        await asyncio.sleep(0.5)
         async with self.temp_update_cond:
             heat_output = self.current_heat_output
             self.update_room_temperatures(current_room_temperatures, heat_output, dt)
-            await asyncio.sleep(0.2)
             self.temp_update_cond.notify_all()
             await self.temp_update_cond.wait_for(self.all_temperatures_updated)
-            self.temperatures_updates = {name: False for name in self.room_names}
+            print(f'{heat_output = }')
+            self.temperatures_updated = cleared_update_dict()
 
     async def run_simulation(self):
         self.simulation_started = asyncio.Event()
