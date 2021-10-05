@@ -1,0 +1,22 @@
+{
+  "service_registry": {
+    "address": "172.16.1.3",
+    "port": 8443,
+    "system_name": "service_registry"
+  },
+  "orchestrator": {
+    "address": "172.16.1.4",
+    "port": 8441,
+    "system_name": "orchestrator"
+  },
+  "authorization": {
+    "address": "172.16.1.5",
+    "port": 8445,
+    "system_name": "authorization"
+  },
+  "event_handler": {
+    "address": "172.16.1.6",
+    "port": 8455,
+    "system_name": "event_handler"
+  }
+}
